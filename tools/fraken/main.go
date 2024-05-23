@@ -36,7 +36,7 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/hillu/go-yara/v4"
+	yara "github.com/VirusTotal/yara-x/go"
 )
 
 // Scanner is an instance of the Yara scanner.
@@ -269,7 +269,7 @@ func (s *Scanner) compile() error {
 		return err
 	}
 	for _, v := range externalVariables {
-		compiler.DefineVariable(v, "")
+		compiler.DefineGlobal(v, "")
 	}
 
 	rulesStat, err := os.Stat(s.rulesPath)
@@ -291,7 +291,7 @@ func (s *Scanner) compile() error {
 				if err != nil {
 					return fmt.Errorf("unable to funge rules %v: %v", filePath, err)
 				}
-				err = compiler.AddString(r, "")
+				err = compiler.AddSource(r)
 				if err != nil {
 					return fmt.Errorf("unable to parse rule %v: %v", filePath, err)
 				}
@@ -306,7 +306,7 @@ func (s *Scanner) compile() error {
 		if err != nil {
 			return fmt.Errorf("unable to funge rules %v: %v", s.rulesPath, err)
 		}
-		err = compiler.AddString(r, "")
+		err = compiler.AddSource(r)
 		if err != nil {
 			return fmt.Errorf("unable to compile rules: %v", err)
 		}
@@ -317,14 +317,14 @@ func (s *Scanner) compile() error {
 		if err != nil {
 			return fmt.Errorf("unable to funge parameterised rules: %v", err)
 		}
-		err = compiler.AddString(r, "")
+		err = compiler.AddSource(r)
 		if err != nil {
 			return fmt.Errorf("error adding rule from parameter: %v", err)
 		}
 	}
 
 	// Collect and compile Yara rules.
-	s.Rules, err = compiler.GetRules()
+	s.Rules = compiler.Build()
 	if err != nil {
 		return err
 	}
@@ -408,38 +408,46 @@ func filesystemScan(wait chan struct{}, c chan *Detection, minimumScore int) {
 	wg.Wait()
 }
 
-func scanFile(s Scanner, filePath string, fileInfo os.FileInfo) (yara.MatchRules, error) {
-	var matches yara.MatchRules
-
-	ys, err := yara.NewScanner(s.Rules)
-	if err != nil {
-		return nil, fmt.Errorf("unable to load scanner: %v", err)
-	}
+func scanFile(s Scanner, filePath string, fileInfo os.FileInfo) ([]*yara.Rule, error) {
+	ys := yara.NewScanner(s.Rules)
 
 	// Fill the variables
-	ys.DefineVariable("filepath", filePath)
-	ys.DefineVariable("filename", fileInfo.Name())
-	ys.DefineVariable("extension", filepath.Ext(filePath))
+	ys.SetGlobal("filepath", filePath)
+	ys.SetGlobal("filename", fileInfo.Name())
+	ys.SetGlobal("extension", filepath.Ext(filePath))
 
 	stat := fileInfo.Sys().(*syscall.Stat_t)
 	// TODO: Read this in from mounted /etc/passwd if we have it.
 	owner, err := user.LookupId(strconv.FormatUint(uint64(stat.Uid), 10))
 	if err == nil {
-		ys.DefineVariable("owner", owner.Username)
+		ys.SetGlobal("owner", owner.Username)
 	}
 
 	ft, err := getFileTypes(filePath)
 	if err != nil {
 		log.Printf("Unable to determine file type of file %v: %v\n", filePath, err)
 	}
-	ys.DefineVariable("filetype", ft)
+	ys.SetGlobal("filetype", ft)
 
 	// Scan the file.
 	f, err := os.Open(filePath)
 	if err != nil {
 		log.Printf("Unable to open file %v: %v\n", filePath, err)
 	}
-	err = ys.SetCallback(&matches).ScanFileDescriptor(f.Fd())
+	defer f.Close()
+
+	fstat, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+
+	fileBuf := make([]byte, fstat.Size())
+	_, err = bufio.NewReader(f).Read(fileBuf)
+	if err != nil {
+		return nil, err
+	}
+
+	matches, err := ys.Scan(fileBuf)
 
 	if err != nil {
 		return matches, err

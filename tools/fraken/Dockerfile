@@ -27,26 +27,28 @@ RUN apk add --no-cache -t .build-deps \
   py3-setuptools \
   python3 \
   python3-dev \
+  rustup \
   sudo
 
 RUN set -x \
   && echo "Compiling Yara from source..."
 
 # Fetch and compile libyara
-RUN mkdir -p /opt/fraken/yara
-WORKDIR /opt/fraken/yara
-RUN cd /opt/fraken/yara && curl -s -L --retry 5 "$(curl -s -L --retry 5 https://api.github.com/repos/VirusTotal/Yara/releases/latest | sed -n 's/.*"tarball_url": "\(.*\)",.*/\1/p')"  | tar -xz --strip-components=1
-RUN ./bootstrap.sh
-RUN sync
-RUN ./configure --with-crypto \
-  --enable-magic \
-  --enable-cuckoo
-RUN make
-RUN sudo make install
+RUN mkdir -p /opt/fraken
+WORKDIR /opt/fraken
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs > /tmp/rustup.sh
+RUN sh /tmp/rustup.sh -y
+RUN $HOME/.cargo/bin/rustup toolchain install stable --profile minimal --no-self-update
+RUN $HOME/.cargo/bin/cargo install cargo-c 
+RUN cd /opt/fraken && git clone https://github.com/VirusTotal/yara-x.git
+RUN cd yara-x
+WORKDIR /opt/fraken/yara-x 
+RUN sudo $HOME/.cargo/bin/cargo cinstall -p yara-x-capi --release
 
 # Compile fraken statically
-COPY tools/fraken/* /opt/fraken/
-RUN cd /opt/fraken && GOOS=linux GOARCH=amd64 go build -a -v -ldflags="-linkmode=external -extldflags=-static" -installsuffix netgo -tags yara_static,osusergo,netgo -o fraken
+COPY * /opt/fraken/
+# RUN cd /opt/fraken && GOOS=linux GOARCH=amd64 go build -a -v -ldflags="-linkmode=external -extldflags=-static" -installsuffix netgo -tags yara_static,osusergo,netgo -o fraken
+RUN cd /opt/fraken && GOOS=linux GOARCH=amd64 go build
 
 FROM alpine:3.18.4 AS fraken
 # Install yara rules and fraken binary.
