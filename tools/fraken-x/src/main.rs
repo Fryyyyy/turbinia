@@ -1,5 +1,7 @@
 // Some portions Copyright (c) 2024. The YARA-X Authors. All Rights Reserved.
 
+use std::fs::File;
+use std::io::{BufReader, Read};
 use std::path::Path;
 use std::{fs, path::PathBuf, process, sync::atomic::Ordering};
 
@@ -101,7 +103,6 @@ impl Component for ScanState {
     }
 }
 
-// TODO(fryy): Magics (filetype)
 // TODO(fryy): Owner
 
 pub trait OutputHandler: Sync {
@@ -202,7 +203,21 @@ fn main() {
     let cli = Cli::parse();
 
     let mut compiler = yara_x::Compiler::new();
+    let mut definitions: Vec<(Vec<u8>, String)> = vec![];
+    let mut max_signature_len = 0;
     let state = ScanState::new();
+
+    if cli.magic.is_some() {
+        eprintln!("[+] Testing existence of magic file");
+    
+        let magic_path = cli.rules.join(cli.magic.unwrap_or("".into()).clone());
+        if !magic_path.exists() || !magic_path.is_file() {
+            eprintln!("[-] Magic file specified but file not found.");
+        } else {
+            (definitions, max_signature_len) = parse_definitions_file(magic_path.to_str().unwrap()).unwrap();
+            eprintln!("[+] {} magics parsed", definitions.len());
+        }
+    }
 
     // External vars.
     let vars = vec!["filepath", "filename", "filetype", "extension", "owner"];
@@ -266,6 +281,17 @@ fn main() {
             scanner.set_global("filepath", file_path.to_str().unwrap())?;
             scanner.set_global("filename", file_path.file_name().unwrap().to_str().unwrap())?;
             scanner.set_global("extension", file_path.extension().map(|name| name.to_string_lossy().into_owned()).unwrap_or("".to_string()))?;
+
+            // Magics
+            let definitions_clone = definitions.clone();
+            let target_bytes = read_first_bytes(file_path.to_str().unwrap_or(""), max_signature_len).unwrap();
+            for (hex_bytes, description) in definitions_clone {
+                if target_bytes.starts_with(&hex_bytes) {
+                    scanner.set_global("filetype", description)?;
+                    break;
+                }
+            }
+
             let scan_results = scanner.scan_file(file_path.as_path());
             let scan_results = scan_results?;
             let matched_count = scan_results.matching_rules().len();
@@ -306,4 +332,56 @@ fn main() {
     ).unwrap();
 
     println!("Done!")
+}
+
+fn parse_definitions_file(
+    file_path: &str,
+) -> Result<(Vec<(Vec<u8>, String)>, usize), Box<dyn std::error::Error>> {
+    let file = File::open(file_path)?;
+    let reader = BufReader::new(file);
+    let mut definitions = Vec::new();
+    let mut max_len = 0;
+
+    for line in std::io::BufRead::lines(reader) {
+        let line = line?;
+        let line = line.trim();
+
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        let parts: Vec<&str> = line.split(';').collect();
+        if parts.len() != 2 {
+            return Err(format!("Invalid line format: {}", line).into());
+        }
+
+        let hex_str = parts[0].trim();
+        let description = parts[1].trim().to_string();
+
+        let hex_bytes = hex_str
+            .split_whitespace()
+            .map(|byte_str| u8::from_str_radix(byte_str, 16))
+            .collect::<Result<Vec<u8>, _>>()?;
+
+        let len = hex_bytes.len();
+        if len > max_len {
+            max_len = len;
+        }
+
+        definitions.push((hex_bytes, description));
+    }
+
+    Ok((definitions, max_len)) // Return both definitions and max length
+}
+
+fn read_first_bytes(file_path: &str, num_bytes: usize) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    if file_path.is_empty() {
+        return Ok(Vec::new());
+    }
+    let file = File::open(file_path)?;
+    let reader = BufReader::new(file);
+    let mut buffer = Vec::new();
+    reader.take(num_bytes as u64).read_to_end(&mut buffer)?;
+
+    Ok(buffer)
 }
