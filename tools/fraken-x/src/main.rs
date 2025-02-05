@@ -16,8 +16,8 @@ use clap::{Args, Parser};
 
 use yara_x::{MatchingRules, MetaValue, Scanner, SourceCode};
 
-use yansi::Paint;
 use yansi::Color::Red;
+use yansi::Paint;
 
 use sha256::try_digest;
 
@@ -34,22 +34,20 @@ struct Cli {
     #[arg(long, default_value = "misc/file-type-signatures.txt")]
     magic: Option<PathBuf>,
 
-
     /// Only rules with scores greater than this will be output
     #[arg(long, default_value_t = 40)]
     minscore: i64,
 }
 
-
 #[derive(Args)]
 #[group(required = true, multiple = false)]
 struct TestOrScan {
     /// Specify a particular folder to be scanned
-    #[arg(short, long, group="testorscan")]
+    #[arg(short, long, group = "testorscan")]
     folder: Option<PathBuf>,
 
     /// Test the rules for syntax validity and then exit
-    #[arg(long, group="testorscan")]
+    #[arg(long, group = "testorscan")]
     testrules: bool,
 }
 
@@ -85,8 +83,7 @@ impl Component for ScanState {
             self.num_scanned_files.load(Ordering::Relaxed)
         );
 
-        let num_matching_files =
-            self.num_matching_files.load(Ordering::Relaxed);
+        let num_matching_files = self.num_matching_files.load(Ordering::Relaxed);
 
         let matched = format!("{} file(s) matched.", num_matching_files);
 
@@ -134,14 +131,20 @@ struct MatchJson {
 }
 
 impl OutputHandler for JsonOutputHandler {
-    fn on_file_scanned(&self, file_path: &Path, scan_results: MatchingRules<'_, '_>, _output: &Sender<Message>, minimum_score : i64) {
+    fn on_file_scanned(
+        &self,
+        file_path: &Path,
+        scan_results: MatchingRules<'_, '_>,
+        _output: &Sender<Message>,
+        minimum_score: i64,
+    ) {
         let path = file_path
-        .canonicalize()
-        .ok()
-        .as_ref()
-        .and_then(|absolute| absolute.to_str())
-        .map(|s| s.to_string())
-        .unwrap_or_default();
+            .canonicalize()
+            .ok()
+            .as_ref()
+            .and_then(|absolute| absolute.to_str())
+            .map(|s| s.to_string())
+            .unwrap_or_default();
 
         let mut matches = Vec::new();
 
@@ -176,7 +179,7 @@ impl OutputHandler for JsonOutputHandler {
                 }
                 if key == "context" {
                     if let MetaValue::String(value) = value {
-                        if value == "yes" || value == "true" || value == "1"{
+                        if value == "yes" || value == "true" || value == "1" {
                             output.Score = 0;
                         }
                     }
@@ -209,38 +212,40 @@ fn main() {
 
     if cli.magic.is_some() {
         eprintln!("[+] Testing existence of magic file");
-    
+
         let magic_path = cli.rules.join(cli.magic.unwrap_or("".into()).clone());
         if !magic_path.exists() || !magic_path.is_file() {
             eprintln!("[-] Magic file specified but file not found.");
         } else {
-            (definitions, max_signature_len) = parse_definitions_file(magic_path.to_str().unwrap()).unwrap();
+            (definitions, max_signature_len) =
+                parse_definitions_file(magic_path.to_str().unwrap()).unwrap();
             eprintln!("[+] {} magics parsed", definitions.len());
         }
     }
 
     // External vars.
     let vars = vec!["filepath", "filename", "filetype", "extension", "owner"];
-     for ident in vars {
+    for ident in vars {
         compiler.define_global(ident, "").unwrap();
-     }
+    }
 
     // Scan the rules dir
     let mut w = Walker::path(cli.rules.as_path());
     w.filter("**/*.yar");
     w.filter("**/*.yara");
-    if let Err(err) = w.walk(|file_path| {
+    if let Err(err) = w.walk(
+        |file_path| {
             eprintln!("[-] Attempting to parse {}", file_path.display());
-            let src = fs::read(file_path).with_context(|| {
-                format!("can not read `{}`", file_path.display())
-            })?;
-            
-            let src = SourceCode::from(src.as_slice()).with_origin(file_path.as_os_str().to_str().unwrap());
+            let src = fs::read(file_path)
+                .with_context(|| format!("can not read `{}`", file_path.display()))?;
+
+            let src = SourceCode::from(src.as_slice())
+                .with_origin(file_path.as_os_str().to_str().unwrap());
             let _ = compiler.add_source(src);
-            
+
             Ok(())
-    },
-    Err,
+        },
+        Err,
     ) {
         eprintln!("Rules parsing error: {}", err);
         process::exit(1);
@@ -261,7 +266,6 @@ fn main() {
     if cli.testorscan.testrules {
         println!("[+] Rules are valid!");
         process::exit(0);
-
     }
     eprintln!("[+] Scanning!");
     let path = cli.testorscan.folder.expect("Needs a path");
@@ -280,11 +284,18 @@ fn main() {
         |state, output, file_path, scanner| {
             scanner.set_global("filepath", file_path.to_str().unwrap())?;
             scanner.set_global("filename", file_path.file_name().unwrap().to_str().unwrap())?;
-            scanner.set_global("extension", file_path.extension().map(|name| name.to_string_lossy().into_owned()).unwrap_or("".to_string()))?;
+            scanner.set_global(
+                "extension",
+                file_path
+                    .extension()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or("".to_string()),
+            )?;
 
             // Magics
             let definitions_clone = definitions.clone();
-            let target_bytes = read_first_bytes(file_path.to_str().unwrap_or(""), max_signature_len).unwrap();
+            let target_bytes =
+                read_first_bytes(file_path.to_str().unwrap_or(""), max_signature_len).unwrap();
             for (hex_bytes, description) in definitions_clone {
                 if target_bytes.starts_with(&hex_bytes) {
                     scanner.set_global("filetype", description)?;
@@ -315,12 +326,7 @@ fn main() {
             let error = err.to_string();
             let root_cause = err.root_cause().to_string();
             let msg = if error != root_cause {
-                format!(
-                    "{} {}: {}",
-                    "error: ".paint(Red).bold(),
-                    error,
-                    root_cause,
-                )
+                format!("{} {}: {}", "error: ".paint(Red).bold(), error, root_cause,)
             } else {
                 format!("{}: {}", "error: ".paint(Red).bold(), error)
             };
@@ -329,7 +335,8 @@ fn main() {
 
             Ok(())
         },
-    ).unwrap();
+    )
+    .unwrap();
 
     println!("Done!")
 }
@@ -374,7 +381,10 @@ fn parse_definitions_file(
     Ok((definitions, max_len)) // Return both definitions and max length
 }
 
-fn read_first_bytes(file_path: &str, num_bytes: usize) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+fn read_first_bytes(
+    file_path: &str,
+    num_bytes: usize,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     if file_path.is_empty() {
         return Ok(Vec::new());
     }

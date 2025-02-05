@@ -112,10 +112,7 @@ impl<'a> Walker<'a> {
     /// The specified function receives the file metadata associated with a
     /// file and must return `false` if the file should be ignored or `true``
     /// if otherwise.
-    pub fn metadata_filter(
-        &mut self,
-        filter: impl Fn(Metadata) -> bool + Send + 'a,
-    ) -> &mut Self {
+    pub fn metadata_filter(&mut self, filter: impl Fn(Metadata) -> bool + Send + 'a) -> &mut Self {
         self.metadata_filter = Some(Box::new(filter));
         self
     }
@@ -140,15 +137,16 @@ impl<'a> Walker<'a> {
         F: FnMut(&Path) -> anyhow::Result<()>,
         E: FnMut(anyhow::Error) -> anyhow::Result<()>,
     {
-        let metadata =
-            match self.path.metadata().with_context(|| {
-                format!("can't open `{}`", self.path.display())
-            }) {
-                Ok(metadata) => metadata,
-                Err(err) => {
-                    return e(err);
-                }
-            };
+        let metadata = match self
+            .path
+            .metadata()
+            .with_context(|| format!("can't open `{}`", self.path.display()))
+        {
+            Ok(metadata) => metadata,
+            Err(err) => {
+                return e(err);
+            }
+        };
 
         if self.file_list {
             if !metadata.is_file() {
@@ -222,10 +220,7 @@ impl<'a> Walker<'a> {
         let mut builder = if self.filters.is_empty() {
             globwalk::GlobWalkerBuilder::from_patterns(path, &["**"])
         } else {
-            globwalk::GlobWalkerBuilder::from_patterns(
-                path,
-                self.filters.iter().as_ref(),
-            )
+            globwalk::GlobWalkerBuilder::from_patterns(path, self.filters.iter().as_ref())
         };
 
         builder = builder.file_type(FileType::FILE);
@@ -262,7 +257,10 @@ impl<'a> Walker<'a> {
     }
 
     fn pass_metadata_filter(&self, metadata: Metadata) -> bool {
-        self.metadata_filter.as_ref().map(|f| f(metadata)).unwrap_or(true)
+        self.metadata_filter
+            .as_ref()
+            .map(|f| f(metadata))
+            .unwrap_or(true)
     }
 }
 
@@ -348,7 +346,10 @@ impl<'a> ParWalker<'a> {
     ///
     /// `path` can also point to an individual file instead of a directory.
     pub fn path(path: &'a Path) -> Self {
-        Self { walker: Walker::path(path), num_threads: None }
+        Self {
+            walker: Walker::path(path),
+            num_threads: None,
+        }
     }
 
     /// Creates a [`ParWalker`] that walks the files listed in a text file
@@ -356,7 +357,10 @@ impl<'a> ParWalker<'a> {
     ///
     /// `path` points to the text file that contains the paths to be walked.
     pub fn file_list(path: &'a Path) -> Self {
-        Self { walker: Walker::file_list(path), num_threads: None }
+        Self {
+            walker: Walker::file_list(path),
+            num_threads: None,
+        }
     }
 
     /// Sets the number of threads used.
@@ -386,10 +390,7 @@ impl<'a> ParWalker<'a> {
         self
     }
 
-    pub fn metadata_filter(
-        &mut self,
-        filter: impl Fn(Metadata) -> bool + Send + 'a,
-    ) -> &mut Self {
+    pub fn metadata_filter(&mut self, filter: impl Fn(Metadata) -> bool + Send + 'a) -> &mut Self {
         self.walker.metadata_filter(filter);
         self
     }
@@ -409,22 +410,19 @@ impl<'a> ParWalker<'a> {
     where
         S: Component + Send + Sync + 'static,
         I: Fn(&S, &Sender<Message>) -> T + Send + Copy + Sync,
-        A: Fn(&S, &Sender<Message>, PathBuf, &mut T) -> anyhow::Result<()>
-            + Send
-            + Sync
-            + Copy,
+        A: Fn(&S, &Sender<Message>, PathBuf, &mut T) -> anyhow::Result<()> + Send + Sync + Copy,
         F: Fn(&T, &Sender<Message>) + Send + Copy + Sync,
         D: Fn(&Sender<Message>),
-        E: Fn(anyhow::Error, &Sender<Message>) -> anyhow::Result<()>
-            + Send
-            + Copy,
+        E: Fn(anyhow::Error, &Sender<Message>) -> anyhow::Result<()> + Send + Copy,
     {
         // Use the given num_threads or compute it based on available
         // parallelism.
         let num_threads = if let Some(num_threads) = self.num_threads {
             num_threads as usize
         } else {
-            thread::available_parallelism().map(usize::from).unwrap_or(32)
+            thread::available_parallelism()
+                .map(usize::from)
+                .unwrap_or(32)
         };
 
         crossbeam::scope(|s| {
@@ -432,13 +430,11 @@ impl<'a> ParWalker<'a> {
 
             // Channel that will contain the paths of the files that need to
             // be processed by `func`.
-            let (paths_send, paths_recv) =
-                crossbeam::channel::bounded::<PathBuf>(128);
+            let (paths_send, paths_recv) = crossbeam::channel::bounded::<PathBuf>(128);
 
             // Channel where `func` will put the lines that it wants to show
             // in the console.
-            let (msg_send, msg_recv) =
-                crossbeam::channel::unbounded::<Message>();
+            let (msg_send, msg_recv) = crossbeam::channel::unbounded::<Message>();
 
             let state = Arc::new(state);
 
@@ -451,12 +447,8 @@ impl<'a> ParWalker<'a> {
                 threads.push(s.spawn(move |_| {
                     let mut per_thread_obj = init(&state, &msg_send);
                     for path in paths_recv {
-                        let res = action(
-                            &state,
-                            &msg_send,
-                            path.to_path_buf(),
-                            &mut per_thread_obj,
-                        );
+                        let res =
+                            action(&state, &msg_send, path.to_path_buf(), &mut per_thread_obj);
                         if let Err(err) = res {
                             if error(err, &msg_send).is_err() {
                                 let _ = msg_send.send(Message::Abort);
@@ -522,10 +514,11 @@ impl<'a> ParWalker<'a> {
                 state.clone(),
             );
 
-            threads.into_iter().for_each(|thread| thread.join().unwrap());
+            threads
+                .into_iter()
+                .for_each(|thread| thread.join().unwrap());
 
-            let (msg_send, msg_recv) =
-                crossbeam::channel::bounded::<Message>(32);
+            let (msg_send, msg_recv) = crossbeam::channel::bounded::<Message>(32);
 
             let handle = thread::spawn(move || {
                 output_messages(
@@ -570,18 +563,14 @@ fn output_messages<S>(
         match msg_recv.recv_timeout(render_period) {
             Ok(Message::Info(s)) => {
                 if let Some(console) = console.as_mut() {
-                    console.emit(Lines::from_colored_multiline_string(
-                        s.as_str(),
-                    ));
+                    console.emit(Lines::from_colored_multiline_string(s.as_str()));
                 } else {
                     println!("{}", s)
                 }
             }
             Ok(Message::Error(s)) => {
                 if let Some(console) = console.as_mut() {
-                    console.emit(Lines::from_colored_multiline_string(
-                        s.as_str(),
-                    ));
+                    console.emit(Lines::from_colored_multiline_string(s.as_str()));
                 } else {
                     eprintln!("{}", s)
                 }
