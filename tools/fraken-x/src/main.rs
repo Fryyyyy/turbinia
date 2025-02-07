@@ -1,12 +1,13 @@
 // Some portions Copyright (c) 2024. The YARA-X Authors. All Rights Reserved.
 
 use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io::BufReader;
 use std::path::Path;
 use std::{fs, path::PathBuf, process, sync::atomic::Ordering};
 
 use anyhow::Context;
 use crossbeam::channel::Sender;
+use fraken_x::magic;
 use fraken_x::walk::{Message, ParWalker, Walker};
 use superconsole::{style::Stylize, Component, Line, Lines, Span};
 
@@ -36,7 +37,11 @@ struct Cli {
 
     /// Only rules with scores greater than this will be output
     #[arg(long, default_value_t = 40)]
-    minscore: i64,
+    minscore: u32,
+
+    /// Only files less than this size will be scanned
+    #[arg(long, default_value_t = 1073741824)]
+    maxsize: u64,
 }
 
 #[derive(Args)]
@@ -55,13 +60,15 @@ struct TestOrScan {
 struct ScanState {
     num_scanned_files: AtomicUsize,
     num_matching_files: AtomicUsize,
+    definitions: Vec<(Vec<u8>, String)>,
 }
 
 impl ScanState {
-    fn new() -> Self {
+    fn new(definitions: Vec<(Vec<u8>, String)>) -> Self {
         Self {
             num_scanned_files: AtomicUsize::new(0),
             num_matching_files: AtomicUsize::new(0),
+            definitions: definitions,
         }
     }
 }
@@ -109,7 +116,7 @@ pub trait OutputHandler: Sync {
         file_path: &Path,
         scan_results: MatchingRules<'_, '_>,
         output: &Sender<Message>,
-        minimum_score: i64,
+        minimum_score: u32,
     );
     /// Called when the last file has been scanned.
     fn on_done(&self, _output: &Sender<Message>);
@@ -136,7 +143,7 @@ impl OutputHandler for JsonOutputHandler {
         file_path: &Path,
         scan_results: MatchingRules<'_, '_>,
         _output: &Sender<Message>,
-        minimum_score: i64,
+        minimum_score: u32,
     ) {
         let path = file_path
             .canonicalize()
@@ -161,6 +168,7 @@ impl OutputHandler for JsonOutputHandler {
             let metadata = matching_rule.metadata();
             for (key, value) in metadata {
                 if key == "score" {
+                    // If it's not an Integer or String, ignore it.
                     if let MetaValue::Integer(value) = value {
                         output.Score = value;
                     } else if let MetaValue::String(value) = value {
@@ -185,7 +193,7 @@ impl OutputHandler for JsonOutputHandler {
                     }
                 }
             }
-            if output.Score >= minimum_score {
+            if output.Score >= minimum_score.into() {
                 matches.push(output);
             }
         }
@@ -199,7 +207,7 @@ impl OutputHandler for JsonOutputHandler {
             std::mem::take(&mut *lock)
         };
         let rendered_json = serde_json::to_string(&matches).expect("Failed to render JSON");
-        output.send(Message::Info(rendered_json)).unwrap();
+        let _ = output.send(Message::Info(rendered_json));
     }
 }
 fn main() {
@@ -208,7 +216,7 @@ fn main() {
     let mut compiler = yara_x::Compiler::new();
     let mut definitions: Vec<(Vec<u8>, String)> = vec![];
     let mut max_signature_len = 0;
-    let state = ScanState::new();
+    
 
     if cli.magic.is_some() {
         eprintln!("[+] Testing existence of magic file");
@@ -217,11 +225,14 @@ fn main() {
         if !magic_path.exists() || !magic_path.is_file() {
             eprintln!("[-] Magic file specified but file not found.");
         } else {
+            let magic_file = File::open(magic_path).expect("Failed to open magic file");
+            let reader = BufReader::new(magic_file);
             (definitions, max_signature_len) =
-                parse_definitions_file(magic_path.to_str().unwrap()).unwrap();
+                magic::parse_definitions_file(reader).expect("Failed to parse magic file");
             eprintln!("[+] {} magics parsed", definitions.len());
         }
     }
+    let state = ScanState::new(definitions);
 
     // External vars.
     let vars = vec!["filepath", "filename", "filetype", "extension", "owner"];
@@ -282,6 +293,10 @@ fn main() {
         },
         // File handler
         |state, output, file_path, scanner| {
+            let metadata = fs::metadata(file_path.clone())?;
+            if metadata.len() > cli.maxsize {
+                return Ok(());
+            }
             scanner.set_global("filepath", file_path.to_str().unwrap())?;
             scanner.set_global("filename", file_path.file_name().unwrap().to_str().unwrap())?;
             scanner.set_global(
@@ -293,12 +308,12 @@ fn main() {
             )?;
 
             // Magics
-            let definitions_clone = definitions.clone();
             let target_bytes =
-                read_first_bytes(file_path.to_str().unwrap_or(""), max_signature_len).unwrap();
-            for (hex_bytes, description) in definitions_clone {
+            // Anyhow
+                magic::read_first_bytes(file_path.to_str().unwrap_or(""), max_signature_len).unwrap();
+            for (hex_bytes, description) in &state.definitions {
                 if target_bytes.starts_with(&hex_bytes) {
-                    scanner.set_global("filetype", description)?;
+                    scanner.set_global("filetype", description.clone())?;
                     break;
                 }
             }
@@ -306,9 +321,9 @@ fn main() {
             let scan_results = scanner.scan_file(file_path.as_path());
             let scan_results = scan_results?;
             let matched_count = scan_results.matching_rules().len();
-            let matched = Box::new(scan_results.matching_rules());
+            let matched = scan_results.matching_rules();
 
-            output_handler.on_file_scanned(file_path.as_path(), *matched, output, cli.minscore);
+            output_handler.on_file_scanned(file_path.as_path(), matched, output, cli.minscore);
 
             state.num_scanned_files.fetch_add(1, Ordering::Relaxed);
             if matched_count > 0 {
@@ -338,60 +353,6 @@ fn main() {
     )
     .unwrap();
 
-    println!("Done!")
+    eprintln!("Done!")
 }
 
-fn parse_definitions_file(
-    file_path: &str,
-) -> Result<(Vec<(Vec<u8>, String)>, usize), Box<dyn std::error::Error>> {
-    let file = File::open(file_path)?;
-    let reader = BufReader::new(file);
-    let mut definitions = Vec::new();
-    let mut max_len = 0;
-
-    for line in std::io::BufRead::lines(reader) {
-        let line = line?;
-        let line = line.trim();
-
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-
-        let parts: Vec<&str> = line.split(';').collect();
-        if parts.len() != 2 {
-            return Err(format!("Invalid line format: {}", line).into());
-        }
-
-        let hex_str = parts[0].trim();
-        let description = parts[1].trim().to_string();
-
-        let hex_bytes = hex_str
-            .split_whitespace()
-            .map(|byte_str| u8::from_str_radix(byte_str, 16))
-            .collect::<Result<Vec<u8>, _>>()?;
-
-        let len = hex_bytes.len();
-        if len > max_len {
-            max_len = len;
-        }
-
-        definitions.push((hex_bytes, description));
-    }
-
-    Ok((definitions, max_len)) // Return both definitions and max length
-}
-
-fn read_first_bytes(
-    file_path: &str,
-    num_bytes: usize,
-) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    if file_path.is_empty() {
-        return Ok(Vec::new());
-    }
-    let file = File::open(file_path)?;
-    let reader = BufReader::new(file);
-    let mut buffer = Vec::new();
-    reader.take(num_bytes as u64).read_to_end(&mut buffer)?;
-
-    Ok(buffer)
-}
