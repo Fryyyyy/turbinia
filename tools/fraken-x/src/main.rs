@@ -2,12 +2,14 @@
 
 use std::fs::File;
 use std::io::BufReader;
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::{fs, path::PathBuf, process, sync::atomic::Ordering};
 
 use anyhow::Context;
 use crossbeam::channel::Sender;
 use fraken_x::magic;
+use fraken_x::userid;
 use fraken_x::walk::{Message, ParWalker, Walker};
 use superconsole::{style::Stylize, Component, Line, Lines, Span};
 
@@ -61,14 +63,16 @@ struct ScanState {
     num_scanned_files: AtomicUsize,
     num_matching_files: AtomicUsize,
     definitions: Vec<(Vec<u8>, String)>,
+    users: Vec<(String, u32)>,
 }
 
 impl ScanState {
-    fn new(definitions: Vec<(Vec<u8>, String)>) -> Self {
+    fn new(definitions: Vec<(Vec<u8>, String)>, users: Vec<(String, u32)>) -> Self {
         Self {
             num_scanned_files: AtomicUsize::new(0),
             num_matching_files: AtomicUsize::new(0),
             definitions: definitions,
+            users: users,
         }
     }
 }
@@ -106,8 +110,6 @@ impl Component for ScanState {
         Ok(lines)
     }
 }
-
-// TODO(fryy): Owner
 
 pub trait OutputHandler: Sync {
     /// Called for each scanned file.
@@ -216,7 +218,9 @@ fn main() {
     let mut compiler = yara_x::Compiler::new();
     let mut definitions: Vec<(Vec<u8>, String)> = vec![];
     let mut max_signature_len = 0;
-    
+
+    eprintln!("[+] Parsing /etc/passwd");
+    let users = userid::get_usernames_from_passwd("/etc/passwd").unwrap_or(vec![]);
 
     if cli.magic.is_some() {
         eprintln!("[+] Testing existence of magic file");
@@ -232,12 +236,12 @@ fn main() {
             eprintln!("[+] {} magics parsed", definitions.len());
         }
     }
-    let state = ScanState::new(definitions);
+    let state = ScanState::new(definitions, users);
 
     // External vars.
     let vars = vec!["filepath", "filename", "filetype", "extension", "owner"];
     for ident in vars {
-        compiler.define_global(ident, "").unwrap();
+        let _ = compiler.define_global(ident, "");
     }
 
     // Scan the rules dir
@@ -278,6 +282,7 @@ fn main() {
         println!("[+] Rules are valid!");
         process::exit(0);
     }
+
     eprintln!("[+] Scanning!");
     let path = cli.testorscan.folder.expect("Needs a path");
     let w = ParWalker::path(path.as_path());
@@ -297,6 +302,13 @@ fn main() {
             if metadata.len() > cli.maxsize {
                 return Ok(());
             }
+            for (username, uid) in &state.users {
+                if metadata.uid() == *uid {
+                    scanner.set_global("owner", (*username).clone())?;
+                    break;
+                }
+            }
+
             scanner.set_global("filepath", file_path.to_str().unwrap())?;
             scanner.set_global("filename", file_path.file_name().unwrap().to_str().unwrap())?;
             scanner.set_global(
@@ -329,6 +341,13 @@ fn main() {
             if matched_count > 0 {
                 state.num_matching_files.fetch_add(1, Ordering::Relaxed);
             }
+
+            // Reset globals
+            scanner.set_global("owner", "")?;
+            scanner.set_global("filepath", "")?;
+            scanner.set_global("filename", "")?;
+            scanner.set_global("extension", "")?;
+            scanner.set_global("filetype", "")?;
 
             Ok(())
         },
