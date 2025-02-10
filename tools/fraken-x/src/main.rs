@@ -1,5 +1,6 @@
 // Some portions Copyright (c) 2024. The YARA-X Authors. All Rights Reserved.
 
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
 use std::os::unix::fs::MetadataExt;
@@ -11,7 +12,7 @@ use crossbeam::channel::Sender;
 use fraken_x::magic;
 use fraken_x::userid;
 use fraken_x::walk::{Message, ParWalker, Walker};
-use superconsole::{style::Stylize, Component, Line, Lines, Span};
+use superconsole::{Component, Lines};
 
 use std::sync::atomic::AtomicUsize;
 
@@ -63,11 +64,11 @@ struct ScanState {
     num_scanned_files: AtomicUsize,
     num_matching_files: AtomicUsize,
     definitions: Vec<(Vec<u8>, String)>,
-    users: Vec<(String, u32)>,
+    users: HashMap<u32, String>,
 }
 
 impl ScanState {
-    fn new(definitions: Vec<(Vec<u8>, String)>, users: Vec<(String, u32)>) -> Self {
+    fn new(definitions: Vec<(Vec<u8>, String)>, users: HashMap<u32, String>) -> Self {
         Self {
             num_scanned_files: AtomicUsize::new(0),
             num_matching_files: AtomicUsize::new(0),
@@ -80,33 +81,11 @@ impl ScanState {
 impl Component for ScanState {
     fn draw_unchecked(
         &self,
-        dimensions: superconsole::Dimensions,
+        _: superconsole::Dimensions,
         _mode: superconsole::DrawMode,
     ) -> anyhow::Result<Lines> {
-        let mut lines = Lines::new();
-
-        lines.push(Line::from_iter([Span::new_unstyled(
-            "─".repeat(dimensions.width),
-        )?]));
-
-        let scanned = format!(
-            " {} file(s) scanned. ",
-            self.num_scanned_files.load(Ordering::Relaxed)
-        );
-
-        let num_matching_files = self.num_matching_files.load(Ordering::Relaxed);
-
-        let matched = format!("{} file(s) matched.", num_matching_files);
-
-        lines.push(Line::from_iter([
-            Span::new_unstyled(scanned)?,
-            Span::new_styled(if num_matching_files > 0 {
-                matched.red().bold()
-            } else {
-                matched.green().bold()
-            })?,
-        ]));
-
+        let lines = Lines::new();
+        // Supress std output.
         Ok(lines)
     }
 }
@@ -208,6 +187,10 @@ impl OutputHandler for JsonOutputHandler {
             let mut lock = self.output_buffer.lock().unwrap();
             std::mem::take(&mut *lock)
         };
+        if matches.len() == 0 {
+            println!("No hits");
+            return;
+        }
         let rendered_json = serde_json::to_string(&matches).expect("Failed to render JSON");
         let _ = output.send(Message::Info(rendered_json));
     }
@@ -218,9 +201,19 @@ fn main() {
     let mut compiler = yara_x::Compiler::new();
     let mut definitions: Vec<(Vec<u8>, String)> = vec![];
     let mut max_signature_len = 0;
+    let users = HashMap::new();
 
-    eprintln!("[+] Parsing /etc/passwd");
-    let users = userid::get_usernames_from_passwd("/etc/passwd").unwrap_or(vec![]);
+    if let Some(etc_folder_path) = cli.testorscan.folder.as_ref() {
+        let joined_path = etc_folder_path.join("/etc/passwd");
+        let full_folder_path = joined_path.to_str().unwrap_or("");
+        eprintln!("[+] Parsing /etc/passwd under {}", full_folder_path);
+        let users = userid::get_usernames_from_passwd(full_folder_path).unwrap_or(HashMap::new());
+        if users.len() == 0 {
+            eprintln!("[-] No users found in /etc/passwd");
+        } else {
+            eprintln!("[+] {} users found", users.len());
+        }
+    }
 
     if cli.magic.is_some() {
         eprintln!("[+] Testing existence of magic file");
@@ -302,11 +295,8 @@ fn main() {
             if metadata.len() > cli.maxsize {
                 return Ok(());
             }
-            for (username, uid) in &state.users {
-                if metadata.uid() == *uid {
-                    scanner.set_global("owner", (*username).clone())?;
-                    break;
-                }
+            if let Some(username) = state.users.get(&metadata.uid()) {
+                scanner.set_global("owner", username.clone())?;
             }
 
             scanner.set_global("filepath", file_path.to_str().unwrap())?;
@@ -372,6 +362,5 @@ fn main() {
     )
     .unwrap();
 
-    eprintln!("Done!")
 }
 
