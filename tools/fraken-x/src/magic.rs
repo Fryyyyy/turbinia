@@ -1,4 +1,7 @@
-use std::{fs::File, io::{BufRead, BufReader, Read}};
+use std::{
+    fs::File,
+    io::{BufRead, BufReader, Read},
+};
 
 // Trait to abstract over different Read types
 pub trait Readable: BufRead {}
@@ -57,7 +60,6 @@ pub fn read_first_bytes(
 
     Ok(buffer)
 }
-
 
 #[cfg(test)]
 mod tests {

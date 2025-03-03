@@ -148,7 +148,7 @@ impl OutputHandler for JsonOutputHandler {
             };
             let metadata = matching_rule.metadata();
             for (key, value) in metadata {
-                if key == "score" {
+                if key == "score" || key == "severity" {
                     // If it's not an Integer or String, ignore it.
                     if let MetaValue::Integer(value) = value {
                         output.Score = value;
@@ -291,6 +291,7 @@ fn main() {
         },
         // File handler
         |state, output, file_path, scanner| {
+            eprint!("Scanning: {}", file_path.display());
             let metadata = fs::metadata(file_path.clone())?;
             if metadata.len() > cli.maxsize {
                 return Ok(());
@@ -312,11 +313,13 @@ fn main() {
             // Magics
             let target_bytes =
             // Anyhow
-                magic::read_first_bytes(file_path.to_str().unwrap_or(""), max_signature_len).unwrap();
-            for (hex_bytes, description) in &state.definitions {
-                if target_bytes.starts_with(&hex_bytes) {
-                    scanner.set_global("filetype", description.clone())?;
-                    break;
+                magic::read_first_bytes(file_path.to_str().unwrap_or(""), max_signature_len).unwrap_or(vec![]);
+            if target_bytes.len() > 0 {
+                for (hex_bytes, description) in &state.definitions {
+                    if target_bytes.starts_with(&hex_bytes) {
+                        scanner.set_global("filetype", description.clone())?;
+                        break;
+                    }
                 }
             }
 
@@ -361,6 +364,4 @@ fn main() {
         },
     )
     .unwrap();
-
 }
-
